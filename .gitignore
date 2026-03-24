@@ -1,0 +1,5 @@
+.env
+__pycache__/
+.playwright-airmenus-profile/
+narus_page_structure
+.idea

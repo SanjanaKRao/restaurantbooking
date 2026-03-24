@@ -1,79 +1,104 @@
 # Naru Booking Bot
 
-This project automates the Naru reservation flow on AirMenus using Playwright and a dedicated Chromium browser profile.
+Playwright automation for the Naru AirMenus booking flow.
 
-It:
-- waits until the booking window opens unless you run with `--dry-run`
-- searches for the best available slot from Sunday night backward through Monday
-- prefers these times in order: `08:30 PM`, `06:30 PM`, `04:30 PM`, `02:30 PM`, `12:30 PM`
-- skips slots that are marked sold out
-- selects either table seating or bar seating based on configuration
-- fills guest details from an `.env` file or CLI flags
-- adjusts the guest counter to a target guest count
-- logs each date, time slot, seating card, guest-counter click, and payment-page transition
+The bot currently:
+- opens the AirMenus order page immediately when you run it
+- works from the saved `zero_page`, `first_page`, `second_page`, and payment flow structure
+- filters booking dates with `NARU_BOOKING_DAYS`
+- filters booking times with `NARU_BOOKING_TIME`
+- iterates visible time slots from latest to earliest when time is `all`
+- fills checkout details from `.env` or CLI flags
+- checks the required house-rules checkbox
+- can continue into Razorpay and enter your UPI ID
+- handles the booked-out checkout modal by clicking `MODIFY BOOKING` and continuing with remaining combinations
+- supports `--dry-run`, which stops at the payment page before UPI automation
 
 ## Files
 
-- `naru_booking_bot.py`: main automation script
+- `naru_booking_bot.py`: main script
 - `.env`: your local booking details
-- `.env.example`: template for creating your own `.env`
+- `zero_page.html/png`: calendar and seating-card reference
+- `first_page.html/png`: time-slot and guest-counter reference
+- `second_page.html/png`: checkout-page reference
+- `booked_out_page.html/png`: checkout booked-out modal reference
 
 ## Setup
 
-1. Install Python dependencies:
+1. Install Playwright:
 
 ```bash
 pip install playwright
 ```
 
-2. Install the Playwright browser:
+2. Install Chromium for Playwright:
 
 ```bash
 playwright install chromium
 ```
 
-3. Create your local env file:
-
-```bash
-cp .env.example .env
-```
-
-4. Edit `.env` and set your values:
+3. Create `.env` and set your values:
 
 ```env
 NARU_NAME=Your Name
+NARU_EMAIL=you@example.com
 NARU_PHONE=+91-9999999999
-NARU_GUEST_NAMES=Guest One, Guest Two, Guest Three
+NARU_BOOKING_UPI=name@bank
+NARU_BOOKING_DAYS=all
+NARU_BOOKING_TIME=all
 NARU_GUEST_COUNT=4
-NARU_SEATING_TYPE=table
+NARU_SEATING_TYPE=bar
 ```
 
-These values are required unless you pass the equivalent CLI flags at runtime.
-`NARU_SEATING_TYPE` is optional and defaults to `table`.
-Set `NARU_GUEST_COUNT` to the total number of guests you want to book for. The bot will detect the current counter value and click `+` or `-` until it reaches that number.
+Required fields:
+- `NARU_NAME`
+- `NARU_EMAIL`
+- `NARU_PHONE`
+- `NARU_GUEST_COUNT`
 
-## How It Works
+Optional fields:
+- `NARU_BOOKING_UPI`
+- `NARU_BOOKING_DAYS`
+- `NARU_BOOKING_TIME`
+- `NARU_SEATING_TYPE`
 
-When you run the script, it launches its own Playwright-controlled Chromium window. You do not need to manually open the booking page first.
+`NARU_UPI_ID` is still accepted as a fallback for older env files.
 
-The script:
-1. waits until Monday `8:00 PM` IST unless `--dry-run` is used
-2. opens the AirMenus booking page
-3. checks Sunday first, then Saturday through Monday
-4. on each day, tries `08:30 PM`, then `06:30 PM`, `04:30 PM`, `02:30 PM`, `12:30 PM`
-5. selects the correct seating card and clicks the `BOOK` button inside that card
-6. fills guest details and adjusts the guest counter
-7. logs when a payment page is reached and pauses if manual action is needed
+## Booking Filters
+
+`NARU_BOOKING_DAYS`
+- `all`: tries Sunday back through Tuesday
+- specific values: `sunday`, `saturday`, `2026-03-29`, `29`
+
+`NARU_BOOKING_TIME`
+- `all`: tries all visible slots from latest to earliest
+- specific values: comma-separated list such as `2:30,8:30`
+
+`NARU_SEATING_TYPE`
+- `bar`
+- `table`
+
+## Flow
+
+The current flow is:
+
+1. Open `https://bookings.airmenus.in/eatnaru/order`
+2. Restore the calendar page if AirMenus reopens inside a nested booking state
+3. Select the requested date on the calendar
+4. Open the requested seating card
+5. Iterate time slots
+6. Select guest count with the `+` / `-` counter
+7. Click `CONTINUE`
+8. Fill name, email, and mobile
+9. Check the house-rules checkbox
+10. Click `PROCEED`
+11. If Razorpay opens and UPI is configured, select UPI and fill the UPI ID
+
+If checkout shows the booked-out modal from `booked_out_page.html`, the bot clicks `MODIFY BOOKING` and continues trying the remaining slot/date combinations instead of stopping.
 
 ## Running
 
-Immediate dry run:
-
-```bash
-python3 naru_booking_bot.py --dry-run
-```
-
-Wait for the real booking window:
+Run with env values:
 
 ```bash
 python3 naru_booking_bot.py
@@ -85,68 +110,57 @@ Run headless:
 python3 naru_booking_bot.py --headless
 ```
 
-Override env values on the command line:
+Run a dry run to the payment page:
 
 ```bash
-python3 naru_booking_bot.py --dry-run --name "Your Name" --phone "+91-9999999999" --guest-names "Guest One, Guest Two, Guest Three" --guest-count 4
+python3 naru_booking_bot.py --dry-run
 ```
 
-Run in table mode:
+Override values on the command line:
 
 ```bash
-python3 naru_booking_bot.py --seating table
+python3 naru_booking_bot.py \
+  --name "Your Name" \
+  --email "you@example.com" \
+  --phone "+91-9999999999" \
+  --guest-count 4 \
+  --seating bar \
+  --booking-days sunday \
+  --booking-time 8:30
 ```
 
-Run in bar mode:
+Run with UPI handoff:
 
 ```bash
-python3 naru_booking_bot.py --seating bar
-```
-
-In `bar` mode, the bot trims the guest list down to the first two names and caps the target guest count at `2`.
-
-Example `.env` for table seating:
-
-```env
-NARU_NAME=Your Name
-NARU_PHONE=+91-9999999999
-NARU_GUEST_NAMES=Guest One, Guest Two, Guest Three
-NARU_GUEST_COUNT=4
-NARU_SEATING_TYPE=table
-```
-
-Example `.env` for bar seating:
-
-```env
-NARU_NAME=Your Name
-NARU_PHONE=+91-9999999999
-NARU_GUEST_NAMES=Guest One, Guest Two
-NARU_GUEST_COUNT=2
-NARU_SEATING_TYPE=bar
-```
-
-## Logs You Will See
-
-Examples:
-
-```text
-Polling iteration 1 started
-Attempting date 2026-03-29
-Date 2026-03-29 selected; checking time slots
-Checking slot 2026-03-29 08:30 PM
-Slot 2026-03-29 08:30 PM unavailable: sold out
-Checking slot 2026-03-29 06:30 PM
-Slot 2026-03-29 06:30 PM selected successfully
-Found seating card candidate: TABLE - 1 (Seats 6) ...
-Attempting seating card TABLE - 1
-Seating card TABLE - 1 selected successfully
-Detected current guest counter value: 1
-Adjusting guest counter toward 4: increment 1/3
-Payment page reached in the Playwright browser.
+python3 naru_booking_bot.py \
+  --name "Your Name" \
+  --email "you@example.com" \
+  --phone "+91-9999999999" \
+  --guest-count 4 \
+  --upi-id "name@bank"
 ```
 
 ## Notes
 
-- The browser session is stored in `.playwright-airmenus-profile/`.
-- AirMenus can change its DOM, so selectors may need adjustment later.
-- Full payment automation is not implemented; the script detects the payment page and leaves the final payment step for manual completion.
+- The browser profile is stored in `.playwright-airmenus-profile/`.
+- The mobile field is currently targeted through `input[type="tel"]` first, matching the saved checkout page.
+- The bot treats actual page transitions as the source of truth. For example, the seating step is only considered successful if the slot page actually opens.
+- Razorpay is dynamic and cross-origin. The UPI step is best-effort; if the live layout differs, the browser pauses on the payment page for manual completion.
+- AirMenus is a React app and can leave stale DOM around. The recovery logic is tuned to the current live behavior and the saved HTML snapshots.
+
+## Typical Logs
+
+```text
+Attempting date 2026-03-29
+Date 2026-03-29 selected; waiting for date state to settle before checking seating cards
+Selecting bar seating option from seating cards
+Attempting seating card RAMEN BAR SEATING
+Inspecting slot 2026-03-29 08:30 PM
+Slot 2026-03-29 08:30 PM available; attempting click
+Adjusting guest counter toward 4: clicking + 1/4
+Filled name using input[name="name"]
+Filled email using input[name="email"]
+Filled phone using input[type="tel"]
+Clicked modify booking
+Selected slot 2026-03-29 08:30 PM was booked out during checkout. Trying remaining options.
+```
