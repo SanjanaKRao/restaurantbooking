@@ -504,6 +504,18 @@ def normalize_choice_token(value: str) -> str:
     return normalize_text(value).replace(".", ":")
 
 
+def ordered_choice_tokens(raw_value: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in raw_value.split(","):
+        normalized = normalize_choice_token(token)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return tuple(ordered)
+
+
 def date_aliases(target: date) -> tuple[str, ...]:
     return tuple(
         normalize_choice_token(value)
@@ -528,14 +540,24 @@ def filter_candidate_dates(candidate_dates: list[date], booking_days: str) -> li
     if not normalized or normalized == "all":
         return candidate_dates
 
-    requested_tokens = [normalize_choice_token(token) for token in booking_days.split(",") if token.strip()]
-    filtered = [
-        candidate_day
-        for candidate_day in candidate_dates
-        if any(token in date_aliases(candidate_day) for token in requested_tokens)
-    ]
-    if filtered:
-        return filtered
+    requested_tokens = ordered_choice_tokens(booking_days)
+    matched_dates: list[date] = []
+    used_dates: set[date] = set()
+    for requested_token in requested_tokens:
+        match = next(
+            (
+                candidate_day
+                for candidate_day in candidate_dates
+                if candidate_day not in used_dates and requested_token in date_aliases(candidate_day)
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        matched_dates.append(match)
+        used_dates.add(match)
+    if matched_dates:
+        return matched_dates
 
     allowed = ", ".join(candidate_day.isoformat() for candidate_day in candidate_dates)
     raise ValueError(
@@ -547,7 +569,7 @@ def parse_booking_times(raw_value: str) -> Optional[tuple[str, ...]]:
     normalized = normalize_choice_token(raw_value)
     if not normalized or normalized == "all":
         return None
-    times = tuple(normalize_choice_token(token) for token in raw_value.split(",") if token.strip())
+    times = ordered_choice_tokens(raw_value)
     if not times:
         return None
     return times
@@ -684,6 +706,19 @@ def parse_time_label(value: str, day: date) -> Optional[datetime]:
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def slot_availability_status(value: str, guest_count: int) -> str:
+    normalized = normalize_text(value)
+    if "sold out" in normalized or "unavailable" in normalized:
+        return "sold out"
+    left_match = re.search(r"\b(\d+)\s+left\b", normalized)
+    if left_match:
+        seats_left = int(left_match.group(1))
+        if guest_count < seats_left:
+            return "available"
+        return f"only {seats_left} left for guest count {guest_count}"
+    return "available"
 
 
 def click_locator(locator: Locator, description: str) -> bool:
@@ -1175,6 +1210,7 @@ def click_best_time_option(
     day: date,
     latest_allowed_time: datetime,
     requested_times: Optional[tuple[str, ...]],
+    guest_count: int,
 ) -> list[SlotCandidate]:
     choices_by_time: dict[tuple[int, int], SlotCandidate] = {}
     seen_labels: set[str] = set()
@@ -1201,9 +1237,7 @@ def click_best_time_option(
             slot_key = (parsed_time.hour, parsed_time.minute)
             if parsed_time > latest_allowed_time:
                 continue
-            status = "available"
-            if "sold out" in normalized_text or "unavailable" in normalized_text:
-                status = "sold out"
+            status = slot_availability_status(text, guest_count)
             choices_by_time[slot_key] = SlotCandidate(
                 choice=SlotChoice(day=day, label=text.strip(), time_value=parsed_time),
                 status=status,
@@ -1238,7 +1272,7 @@ def click_best_time_option(
     return ordered_entries
 
 
-def click_time_candidate(page: Page, config: BookingConfig, candidate: SlotCandidate) -> bool:
+def click_time_candidate(page: Page, config: BookingConfig, candidate: SlotCandidate, guest_count: int) -> bool:
     for selector in config.time_option_selectors:
         locator = page.locator(selector)
         try:
@@ -1256,12 +1290,13 @@ def click_time_candidate(page: Page, config: BookingConfig, candidate: SlotCandi
                 continue
             if slot_time_aliases(parsed_time) != slot_time_aliases(candidate.choice.time_value):
                 continue
-            normalized_text = normalize_text(text)
-            if "sold out" in normalized_text or "unavailable" in normalized_text:
+            current_status = slot_availability_status(text, guest_count)
+            if current_status != "available":
                 logging.info(
-                    "Slot %s %s became unavailable before click",
+                    "Slot %s %s became unavailable before click: %s",
                     candidate.choice.day.isoformat(),
                     candidate.choice.time_value.strftime("%I:%M %p"),
+                    current_status,
                 )
                 return False
             if click_locator(node, f"best available time '{candidate.choice.label}'"):
@@ -1458,6 +1493,7 @@ def poll_until_target_bookable(
             candidate_day,
             latest_allowed_time,
             requested_times=request.booking_times,
+            guest_count=request.guest_count,
         )
         for candidate in candidates:
             slot_label = candidate.choice.time_value.strftime("%I:%M %p")
@@ -1466,7 +1502,7 @@ def poll_until_target_bookable(
                 logging.info("Slot %s %s unavailable: %s", candidate.choice.day.isoformat(), slot_label, candidate.status)
                 continue
             logging.info("Slot %s %s available; attempting click", candidate.choice.day.isoformat(), slot_label)
-            if not click_time_candidate(page, config, candidate):
+            if not click_time_candidate(page, config, candidate, request.guest_count):
                 continue
             attempt_status = attempt_checkout_for_current_slot(page, config, request, args)
             if attempt_status == "success":
